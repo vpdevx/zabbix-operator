@@ -4,7 +4,8 @@ metadata:
   labels:
     app.kubernetes.io/name: zabbix-operator
     app.kubernetes.io/managed-by: kustomize
-  name: zabbix-sample
+  name: zabbix-example22
+  namespace: default
 spec:
   agent: 
     image: zabbix/zabbix-agent:alpine-7.2-latest
@@ -24,6 +25,10 @@ spec:
       requests:
         cpu: 100m
         memory: 256Mi
+    environment:
+      DB_SERVER_HOST: mysql.default.svc.cluster.local
+      DB_SERVER_PORT: "3306"
+      DB_SERVER_DATABASE: zabbix
   web:
     image: zabbix/zabbix-web-nginx-mysql:7.2-alpine-latest
     resources:
@@ -36,15 +41,14 @@ spec:
     ingress:
       enabled: true
       className: traefik
-      -tls:
+      host: zabbix.lab4ever.xyz
+      tls:
         enabled: true
         secretName: cloudflare-origin-cert
         hosts:
-          - *.lab4ever.xyz
+          - zabbix.lab4ever.xyz
   database:
-    host: mysql.default.svc.cluster.local
-    port: 3306
-    databaseName: zabbix
-    credentialsSecret: zabbix-credentials
-
+    type: mysql # mysql or postgresql
+    credentials:
+      fromSecret: spring-datasource-secret
 

@@ -71,14 +71,25 @@ type IngressTLS struct {
 
 type ZabbixDatabase struct {
 	// +kubebuilder:validation:Required
-	Host              string `json:"host"`
-	CredentialsSecret string `json:"credentialsSecret"`
-	Port              int32  `json:"port"`
-	DatabaseName      string `json:"databaseName"`
+	Credentials ZabbixCredentials `json:"credentials,omitempty"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=postgres;mysql
+	Type string `json:"type"`
+}
+
+type ZabbixCredentials struct {
+	Username string `json:"username,omitempty"`
+
+	Password string `json:"password,omitempty"`
+
+	FromSecret string `json:"fromSecret,omitempty"`
 }
 
 // ZabbixStatus defines the observed state of Zabbix
 type ZabbixStatus struct {
+	Status     string             `json:"status,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
