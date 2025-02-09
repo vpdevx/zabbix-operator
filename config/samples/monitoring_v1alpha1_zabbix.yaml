@@ -1,0 +1,50 @@
+apiVersion: monitoring.zabbix.io/v1alpha1
+kind: Zabbix
+metadata:
+  labels:
+    app.kubernetes.io/name: zabbix-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: zabbix-sample
+spec:
+  agent: 
+    image: zabbix/zabbix-agent:alpine-7.2-latest
+    resources:
+      limits:
+        cpu: 200m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  server:
+    image: zabbix/zabbix-server-mysql:7.2-alpine-latest
+    resources:
+      limits:
+        cpu: 400m
+        memory: 1024Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  web:
+    image: zabbix/zabbix-web-nginx-mysql:7.2-alpine-latest
+    resources:
+      limits:
+        cpu: 300m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    ingress:
+      enabled: true
+      className: traefik
+      -tls:
+        enabled: true
+        secretName: cloudflare-origin-cert
+        hosts:
+          - *.lab4ever.xyz
+  database:
+    host: mysql.default.svc.cluster.local
+    port: 3306
+    databaseName: zabbix
+    credentialsSecret: zabbix-credentials
+
+
