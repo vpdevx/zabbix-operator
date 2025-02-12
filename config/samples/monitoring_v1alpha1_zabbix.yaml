@@ -38,10 +38,16 @@ spec:
       requests:
         cpu: 100m
         memory: 256Mi
+    environment:
+      DB_SERVER_HOST: mysql.default.svc.cluster.local
+      DB_SERVER_PORT: "3306"
+      DB_SERVER_DATABASE: zabbix
     ingress:
       enabled: true
       className: traefik
       host: zabbix.lab4ever.xyz
+      path: /
+      pathType: Prefix
       tls:
         enabled: true
         secretName: cloudflare-origin-cert

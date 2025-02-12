@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"strings"
 
+	monitoringv1alpha1 "github.com/vpdevx/zabbix-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,8 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	monitoringv1alpha1 "github.com/vpdevx/zabbix-operator/api/v1alpha1"
 )
 
 // ZabbixReconciler reconciles a Zabbix object
@@ -96,10 +96,32 @@ func (r *ZabbixReconciler) reconcileCreate(ctx context.Context, zabbix *monitori
 		return ctrl.Result{}, err
 	}
 
+	logger.Info("Creating Zabbix Server Service")
 	err = r.createService(ctx, zabbix, "server")
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	logger.Info("Creating Zabbix Web")
+	err = r.createOrUpdateZabbixWeb(ctx, zabbix)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Creating Zabbix Web Service")
+	err = r.createService(ctx, zabbix, "web")
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Creating Zabbix Ingress")
+	if zabbix.Spec.Web.Ingress.Enabled {
+		err = r.createOrUpdateIngress(ctx, zabbix)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -146,7 +168,7 @@ func (r *ZabbixReconciler) createOrUpdateZabbixServer(ctx context.Context, zabbi
 											ContainerPort: 10051,
 										},
 									},
-									Env:       r.buildServerEnvVars(zabbix),
+									Env:       r.buildEnvVars(zabbix, "server"),
 									Resources: zabbix.Spec.Server.Resources,
 								},
 							},
@@ -163,7 +185,7 @@ func (r *ZabbixReconciler) createOrUpdateZabbixServer(ctx context.Context, zabbi
 	}
 
 	deployment.Spec.Template.Spec.Containers[0].Image = zabbix.Spec.Server.Image
-	deployment.Spec.Template.Spec.Containers[0].Env = r.buildServerEnvVars(zabbix)
+	deployment.Spec.Template.Spec.Containers[0].Env = r.buildEnvVars(zabbix, "server")
 	deployment.Spec.Template.Spec.Containers[0].Resources = zabbix.Spec.Server.Resources
 	err := r.Update(ctx, &deployment)
 	if err != nil {
@@ -173,17 +195,89 @@ func (r *ZabbixReconciler) createOrUpdateZabbixServer(ctx context.Context, zabbi
 	return nil
 }
 
+func (r *ZabbixReconciler) createOrUpdateZabbixWeb(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
+	var deployment appsv1.Deployment
+	deploymentName := types.NamespacedName{Name: zabbix.ObjectMeta.Name + "-web", Namespace: zabbix.ObjectMeta.Namespace}
+	if err := r.Get(ctx, deploymentName, &deployment); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to fetch deployment: %w", err)
+		}
+
+		if apierrors.IsNotFound(err) {
+			deployment := appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      zabbix.ObjectMeta.Name + "-web",
+					Namespace: zabbix.ObjectMeta.Namespace,
+					Labels:    r.componentLabels(zabbix, "web"),
+					// Fix zabbix_types.go to support annotations
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: zabbix.APIVersion,
+							Kind:       zabbix.Kind,
+							Name:       zabbix.Name,
+							UID:        zabbix.UID,
+						},
+					},
+				},
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: r.componentLabels(zabbix, "web"),
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: r.componentLabels(zabbix, "web"),
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  zabbix.ObjectMeta.Name + "-web",
+									Image: zabbix.Spec.Web.Image,
+									Ports: []corev1.ContainerPort{
+										{
+											Name:          "http",
+											ContainerPort: 80,
+										},
+									},
+									Env:       r.buildEnvVars(zabbix, "web"),
+									Resources: zabbix.Spec.Web.Resources,
+								},
+							},
+						},
+					},
+				},
+			}
+			err := r.Create(ctx, &deployment)
+			if err != nil {
+				return fmt.Errorf("failed to create zabbix web deployment: %w", err)
+			}
+		}
+	}
+
+	deployment.Spec.Template.Spec.Containers[0].Image = zabbix.Spec.Web.Image
+	deployment.Spec.Template.Spec.Containers[0].Env = r.buildEnvVars(zabbix, "web")
+	deployment.Spec.Template.Spec.Containers[0].Resources = zabbix.Spec.Web.Resources
+	err := r.Update(ctx, &deployment)
+	if err != nil {
+		return fmt.Errorf("failed to update zabbix web deployment: %w", err)
+	}
+
+	return nil
+}
+
 func (r *ZabbixReconciler) createService(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix, component string) error {
 
 	var port int
+	var targetPort int
 	var portName string
 
 	switch component {
 	case "server":
 		port = 10051
+		targetPort = 10051
 		portName = "server"
 	case "web":
 		port = 80
+		targetPort = 8080
 		portName = "http"
 	}
 
@@ -207,7 +301,7 @@ func (r *ZabbixReconciler) createService(ctx context.Context, zabbix *monitoring
 				{
 					Name:       portName,
 					Port:       int32(port),
-					TargetPort: intstr.FromInt(port),
+					TargetPort: intstr.FromInt(targetPort),
 				},
 			},
 		},
@@ -222,6 +316,101 @@ func (r *ZabbixReconciler) createService(ctx context.Context, zabbix *monitoring
 	return nil
 }
 
+func (r *ZabbixReconciler) createOrUpdateIngress(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
+	var ingress networkingv1.Ingress
+	var pathType *networkingv1.PathType
+
+	switch zabbix.Spec.Web.Ingress.PathType {
+	case "ImplementationSpecific":
+		t := networkingv1.PathTypeImplementationSpecific
+		pathType = &t
+	case "Prefix":
+		t := networkingv1.PathTypePrefix
+		pathType = &t
+	case "Exact":
+		t := networkingv1.PathTypeExact
+		pathType = &t
+	}
+
+	ingressName := types.NamespacedName{Name: zabbix.ObjectMeta.Name + "-ingress", Namespace: zabbix.ObjectMeta.Namespace}
+	if err := r.Get(ctx, ingressName, &ingress); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to fetch ingress: %w", err)
+		}
+
+		ingress := networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      zabbix.ObjectMeta.Name + "-ingress",
+				Namespace: zabbix.ObjectMeta.Namespace,
+				Labels:    r.componentLabels(zabbix, "ingress"),
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: zabbix.APIVersion,
+						Kind:       zabbix.Kind,
+						Name:       zabbix.Name,
+						UID:        zabbix.UID,
+					},
+				},
+			},
+			Spec: networkingv1.IngressSpec{
+				IngressClassName: &zabbix.Spec.Web.Ingress.ClassName,
+				Rules: []networkingv1.IngressRule{
+					{
+						Host: zabbix.Spec.Web.Ingress.Host,
+						IngressRuleValue: networkingv1.IngressRuleValue{
+							HTTP: &networkingv1.HTTPIngressRuleValue{
+								Paths: []networkingv1.HTTPIngressPath{
+									{
+										Path:     zabbix.Spec.Web.Ingress.Path,
+										PathType: pathType,
+										Backend: networkingv1.IngressBackend{
+											Service: &networkingv1.IngressServiceBackend{
+												Name: zabbix.ObjectMeta.Name + "-web",
+												Port: networkingv1.ServiceBackendPort{
+													Number: 80,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				TLS: func() []networkingv1.IngressTLS {
+					if zabbix.Spec.Web.Ingress.Tls.Enabled {
+						return []networkingv1.IngressTLS{
+							{
+								Hosts:      zabbix.Spec.Web.Ingress.Tls.Hosts,
+								SecretName: zabbix.Spec.Web.Ingress.Tls.SecretName,
+							},
+						}
+					}
+					return nil
+				}(),
+			},
+		}
+
+		err := r.Create(ctx, &ingress)
+		if err != nil {
+			return fmt.Errorf("failed to create zabbix ingress: %w", err)
+		}
+	}
+
+	ingress.Spec.IngressClassName = &zabbix.Spec.Web.Ingress.ClassName
+	ingress.Spec.Rules[0].Host = zabbix.Spec.Web.Ingress.Host
+	ingress.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].Path = zabbix.Spec.Web.Ingress.Path
+	ingress.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].PathType = pathType
+	ingress.Spec.TLS[0].Hosts = zabbix.Spec.Web.Ingress.Tls.Hosts
+	ingress.Spec.TLS[0].SecretName = zabbix.Spec.Web.Ingress.Tls.SecretName
+
+	err := r.Update(ctx, &ingress)
+	if err != nil {
+		return fmt.Errorf("failed to update zabbix ingress: %w", err)
+	}
+	return nil
+}
+
 func (r *ZabbixReconciler) componentLabels(zabbix *monitoringv1alpha1.Zabbix, component string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "zabbix",
@@ -231,55 +420,103 @@ func (r *ZabbixReconciler) componentLabels(zabbix *monitoringv1alpha1.Zabbix, co
 	}
 }
 
-func (r *ZabbixReconciler) buildServerEnvVars(zabbix *monitoringv1alpha1.Zabbix) []corev1.EnvVar {
+func (r *ZabbixReconciler) buildEnvVars(zabbix *monitoringv1alpha1.Zabbix, component string) []corev1.EnvVar {
 	var envVars []corev1.EnvVar
 	dbType := strings.ToUpper(zabbix.Spec.Database.Type)
-
 	// Database credentials
-	if zabbix.Spec.Database.Credentials.FromSecret != "" {
-		envVars = append(envVars,
-			corev1.EnvVar{
-				Name: fmt.Sprintf("%s_USER", dbType),
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: zabbix.Spec.Database.Credentials.FromSecret,
+	if component == "server" || component == "web" {
+		if zabbix.Spec.Database.Credentials.FromSecret != "" {
+			envVars = append(envVars,
+				corev1.EnvVar{
+					Name: fmt.Sprintf("%s_USER", dbType),
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: zabbix.Spec.Database.Credentials.FromSecret,
+							},
+							Key: "username",
 						},
-						Key: "username",
 					},
 				},
-			},
-			corev1.EnvVar{
-				Name: fmt.Sprintf("%s_PASSWORD", dbType),
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: zabbix.Spec.Database.Credentials.FromSecret,
+				corev1.EnvVar{
+					Name: fmt.Sprintf("%s_PASSWORD", dbType),
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: zabbix.Spec.Database.Credentials.FromSecret,
+							},
+							Key: "password",
 						},
-						Key: "password",
 					},
 				},
-			},
-		)
-	} else {
-		envVars = append(envVars,
-			corev1.EnvVar{
-				Name:  fmt.Sprintf("%s_USER", dbType),
-				Value: zabbix.Spec.Database.Credentials.Username,
-			},
-			corev1.EnvVar{
-				Name:  fmt.Sprintf("%s_PASSWORD", dbType),
-				Value: zabbix.Spec.Database.Credentials.Password,
-			},
-		)
+			)
+		} else {
+			envVars = append(envVars,
+				corev1.EnvVar{
+					Name:  fmt.Sprintf("%s_USER", dbType),
+					Value: zabbix.Spec.Database.Credentials.Username,
+				},
+				corev1.EnvVar{
+					Name:  fmt.Sprintf("%s_PASSWORD", dbType),
+					Value: zabbix.Spec.Database.Credentials.Password,
+				},
+			)
+		}
 	}
 
-	// Add custom environment variables from spec
-	for k, v := range zabbix.Spec.Server.Environment {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  k,
-			Value: v,
-		})
+	if component == "server" {
+		for k, v := range zabbix.Spec.Server.Environment {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  k,
+				Value: v,
+			})
+		}
+	}
+
+	if component == "web" {
+
+		envVars = append(envVars, []corev1.EnvVar{
+			{
+				Name:  "ZBX_SERVER_HOST",
+				Value: zabbix.ObjectMeta.Name + "-server." + zabbix.ObjectMeta.Namespace + ".svc.cluster.local",
+			},
+		}...)
+
+		for k, v := range zabbix.Spec.Web.Environment {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  k,
+				Value: v,
+			})
+		}
+	}
+
+	if component == "agent" {
+
+		envVars = append(envVars, []corev1.EnvVar{
+			{
+				Name: "ZBX_HOSTNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "spec.nodeName",
+					},
+				},
+			},
+			{
+				Name:  "ZBX_SERVER_HOST",
+				Value: zabbix.ObjectMeta.Name + "-server",
+			},
+			{
+				Name:  "ZBX_PASSIVESERVERS",
+				Value: "0.0.0.0/0",
+			},
+		}...)
+
+		for k, v := range zabbix.Spec.Agent.Environment {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  k,
+				Value: v,
+			})
+		}
 	}
 
 	return envVars
