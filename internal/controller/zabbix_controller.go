@@ -23,8 +23,10 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,18 +36,13 @@ import (
 	monitoringv1alpha1 "github.com/vpdevx/zabbix-operator/api/v1alpha1"
 )
 
-const (
-	finalizerName  = "zabbix.monitoring.zabbix.io/finalizer"
-	componentName  = "zabbix-server"
-	serverPort     = 10051
-	serverPortName = "zabbix-server"
-)
-
 // ZabbixReconciler reconciles a Zabbix object
 type ZabbixReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+const finalizerName = "zabbix.io/zabbix_controller_finalizer"
 
 // +kubebuilder:rbac:groups=monitoring.zabbix.io,resources=zabbixes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.zabbix.io,resources=zabbixes/status,verbs=get;update;patch
@@ -58,142 +55,179 @@ func (r *ZabbixReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	zabbix := &monitoringv1alpha1.Zabbix{}
 	if err := r.Get(ctx, req.NamespacedName, zabbix); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	if !zabbix.ObjectMeta.DeletionTimestamp.IsZero() {
-		return r.handleFinalization(ctx, zabbix)
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "failed to get Zabbix resource")
+		return ctrl.Result{}, err
 	}
 
 	if !controllerutil.ContainsFinalizer(zabbix, finalizerName) {
+		logger.Info("adding finalizer")
 		controllerutil.AddFinalizer(zabbix, finalizerName)
-		if err := r.Update(ctx, zabbix); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
-		}
+		return ctrl.Result{}, r.Update(ctx, zabbix)
 	}
 
-	// Reconcile server components
-	if err := r.reconcileServerComponents(ctx, zabbix); err != nil {
-		logger.Error(err, "failed to reconcile server components")
-		return ctrl.Result{}, err
+	if !zabbix.DeletionTimestamp.IsZero() {
+		logger.Info("deleting Zabbix resource")
+		return r.reconcileDelete(ctx, zabbix)
 	}
 
-	// Update status
-	if err := r.updateStatus(ctx, zabbix); err != nil {
-		logger.Error(err, "failed to update status")
-		return ctrl.Result{}, err
-	}
-
-	logger.Info("successfully reconciled Zabbix resource")
-	return ctrl.Result{}, nil
+	logger.Info("Creating Zabbix resource")
+	return r.reconcileCreate(ctx, zabbix)
 }
 
-func (r *ZabbixReconciler) handleFinalization(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) (ctrl.Result, error) {
-	if controllerutil.ContainsFinalizer(zabbix, finalizerName) {
-		// Perform any cleanup logic here if needed
-		controllerutil.RemoveFinalizer(zabbix, finalizerName)
-		if err := r.Update(ctx, zabbix); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
-		}
+func (r *ZabbixReconciler) reconcileDelete(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Deleting Zabbix resource")
+	controllerutil.RemoveFinalizer(zabbix, finalizerName)
+	err := r.Update(ctx, zabbix)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *ZabbixReconciler) reconcileServerComponents(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
-	logger := log.FromContext(ctx).WithValues("component", componentName)
-
-	// Reconcile Deployment
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-server", zabbix.Name),
-			Namespace: zabbix.Namespace,
-		},
+func (r *ZabbixReconciler) reconcileCreate(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Creating Zabbix Server")
+	err := r.createOrUpdateZabbixServer(ctx, zabbix)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
-		deployment.Labels = r.serverLabels(zabbix)
-		deployment.Spec = appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: r.serverLabels(zabbix),
-			},
-			Template: corev1.PodTemplateSpec{
+	err = r.createService(ctx, zabbix, "server")
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ZabbixReconciler) createOrUpdateZabbixServer(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
+	var deployment appsv1.Deployment
+	deploymentName := types.NamespacedName{Name: zabbix.ObjectMeta.Name + "-server", Namespace: zabbix.ObjectMeta.Namespace}
+	if err := r.Get(ctx, deploymentName, &deployment); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to fetch deployment: %w", err)
+		}
+
+		if apierrors.IsNotFound(err) {
+			deployment := appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: r.serverLabels(zabbix),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						r.buildServerContainer(zabbix),
+					Name:      zabbix.ObjectMeta.Name + "-server",
+					Namespace: zabbix.ObjectMeta.Namespace,
+					Labels:    r.componentLabels(zabbix, "server"),
+					// Fix zabbix_types.go to support annotations
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: zabbix.APIVersion,
+							Kind:       zabbix.Kind,
+							Name:       zabbix.Name,
+							UID:        zabbix.UID,
+						},
 					},
 				},
-			},
-		}
-		return controllerutil.SetControllerReference(zabbix, deployment, r.Scheme)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to reconcile deployment: %w", err)
-	}
-	logger.Info("deployment reconciled", "operation", op)
-
-	// Reconcile Service
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-server", zabbix.Name),
-			Namespace: zabbix.Namespace,
-		},
-	}
-
-	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
-		service.Labels = r.serverLabels(zabbix)
-		service.Spec = corev1.ServiceSpec{
-			Selector: r.serverLabels(zabbix),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       serverPortName,
-					Port:       serverPort,
-					TargetPort: intstr.FromInt(serverPort),
-					Protocol:   corev1.ProtocolTCP,
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: r.componentLabels(zabbix, "server"),
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: r.componentLabels(zabbix, "server"),
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  zabbix.ObjectMeta.Name + "-server",
+									Image: zabbix.Spec.Server.Image,
+									Ports: []corev1.ContainerPort{
+										{
+											Name:          "server",
+											ContainerPort: 10051,
+										},
+									},
+									Env:       r.buildServerEnvVars(zabbix),
+									Resources: zabbix.Spec.Server.Resources,
+								},
+							},
+						},
+					},
 				},
-			},
+			}
+			err := r.Create(ctx, &deployment)
+			if err != nil {
+				return fmt.Errorf("failed to create zabbix server deployment: %w", err)
+			}
+			return nil
 		}
-		return controllerutil.SetControllerReference(zabbix, service, r.Scheme)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to reconcile service: %w", err)
 	}
-	logger.Info("service reconciled", "operation", op)
+
+	deployment.Spec.Template.Spec.Containers[0].Image = zabbix.Spec.Server.Image
+	deployment.Spec.Template.Spec.Containers[0].Env = r.buildServerEnvVars(zabbix)
+	deployment.Spec.Template.Spec.Containers[0].Resources = zabbix.Spec.Server.Resources
+	err := r.Update(ctx, &deployment)
+	if err != nil {
+		return fmt.Errorf("failed to update zabbix server deployment: %w", err)
+	}
 
 	return nil
 }
 
-func (r *ZabbixReconciler) serverLabels(zabbix *monitoringv1alpha1.Zabbix) map[string]string {
+func (r *ZabbixReconciler) createService(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix, component string) error {
+
+	var port int
+	var portName string
+
+	switch component {
+	case "server":
+		port = 10051
+		portName = "server"
+	case "web":
+		port = 80
+		portName = "http"
+	}
+
+	service := corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      zabbix.ObjectMeta.Name + "-" + component,
+			Namespace: zabbix.ObjectMeta.Namespace,
+			Labels:    r.componentLabels(zabbix, component),
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: zabbix.APIVersion,
+					Kind:       zabbix.Kind,
+					Name:       zabbix.Name,
+					UID:        zabbix.UID,
+				},
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: r.componentLabels(zabbix, component),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       portName,
+					Port:       int32(port),
+					TargetPort: intstr.FromInt(port),
+				},
+			},
+		},
+		Status: corev1.ServiceStatus{},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &service, func() error {
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create zabbix %s service: %w", component, err)
+	}
+	return nil
+}
+
+func (r *ZabbixReconciler) componentLabels(zabbix *monitoringv1alpha1.Zabbix, component string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "zabbix",
 		"app.kubernetes.io/instance":   zabbix.Name,
-		"app.kubernetes.io/component":  componentName,
+		"app.kubernetes.io/component":  component,
 		"app.kubernetes.io/managed-by": "zabbix-operator",
-	}
-}
-
-/*************  ✨ Codeium Command ⭐  *************/
-// buildServerContainer builds a Container for the Zabbix server component.
-//
-// The returned Container runs the Zabbix server image and exposes the Zabbix
-// server port on the container port named "zabbix-server".
-//
-// The container environment variables are configured using the
-// buildServerEnvVars method.
-/******  4400349c-bd24-48b6-aeff-1c5d5522f19d  *******/
-func (r *ZabbixReconciler) buildServerContainer(zabbix *monitoringv1alpha1.Zabbix) corev1.Container {
-	return corev1.Container{
-		Name:  componentName,
-		Image: zabbix.Spec.Server.Image,
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          serverPortName,
-				ContainerPort: serverPort,
-			},
-		},
-		Env: r.buildServerEnvVars(zabbix),
 	}
 }
 
@@ -249,23 +283,6 @@ func (r *ZabbixReconciler) buildServerEnvVars(zabbix *monitoringv1alpha1.Zabbix)
 	}
 
 	return envVars
-}
-
-func (r *ZabbixReconciler) updateStatus(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
-	status := monitoringv1alpha1.ZabbixStatus{
-		Conditions: []metav1.Condition{
-			{
-				Type:               "Available",
-				Status:             metav1.ConditionTrue,
-				Reason:             "ComponentsReady",
-				Message:            "All components are operational",
-				LastTransitionTime: metav1.Now(),
-			},
-		},
-	}
-
-	zabbix.Status = status
-	return r.Status().Update(ctx, zabbix)
 }
 
 func (r *ZabbixReconciler) SetupWithManager(mgr ctrl.Manager) error {
