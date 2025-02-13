@@ -216,6 +216,10 @@ spec:
                       className:
                         type: string
                       enabled:
+                        default: false
+                        enum:
+                        - true
+                        - false
                         type: boolean
                       host:
                         type: string

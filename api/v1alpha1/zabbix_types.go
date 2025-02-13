@@ -59,6 +59,8 @@ type IngressSpec struct {
 	Path        string            `json:"path,omitempty"`
 	PathType    string            `json:"pathType,omitempty"`
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=true;false
+	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 }
 

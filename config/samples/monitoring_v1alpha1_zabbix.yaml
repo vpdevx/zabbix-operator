@@ -2,9 +2,9 @@ apiVersion: monitoring.zabbix.io/v1alpha1
 kind: Zabbix
 metadata:
   labels:
-    app.kubernetes.io/name: zabbix-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: zabbix-example22
+#    app.kubernetes.io/name: zabbix-operator
+#    app.kubernetes.io/managed-by: kustomize
+  name: zabbix-example222
   namespace: default
 spec:
   agent: 
@@ -45,14 +45,16 @@ spec:
     ingress:
       enabled: true
       className: traefik
-      host: zabbix.lab4ever.xyz
+      annotations:
+        zabbix.io/test: test
+      host: zabbix22.lab4ever.xyz
       path: /
       pathType: Prefix
       tls:
         enabled: true
         secretName: cloudflare-origin-cert
         hosts:
-          - zabbix.lab4ever.xyz
+          - zabbix22.lab4ever.xyz
   database:
     type: mysql # mysql or postgresql
     credentials:

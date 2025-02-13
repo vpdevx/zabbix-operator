@@ -114,8 +114,8 @@ func (r *ZabbixReconciler) reconcileCreate(ctx context.Context, zabbix *monitori
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Creating Zabbix Ingress")
 	if zabbix.Spec.Web.Ingress.Enabled {
+		logger.Info("Creating Zabbix Ingress")
 		err = r.createOrUpdateIngress(ctx, zabbix)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -250,6 +250,7 @@ func (r *ZabbixReconciler) createOrUpdateZabbixWeb(ctx context.Context, zabbix *
 			if err != nil {
 				return fmt.Errorf("failed to create zabbix web deployment: %w", err)
 			}
+			return nil
 		}
 	}
 
@@ -338,36 +339,39 @@ func (r *ZabbixReconciler) createOrUpdateIngress(ctx context.Context, zabbix *mo
 			return fmt.Errorf("failed to fetch ingress: %w", err)
 		}
 
-		ingress := networkingv1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      zabbix.ObjectMeta.Name + "-ingress",
-				Namespace: zabbix.ObjectMeta.Namespace,
-				Labels:    r.componentLabels(zabbix, "ingress"),
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: zabbix.APIVersion,
-						Kind:       zabbix.Kind,
-						Name:       zabbix.Name,
-						UID:        zabbix.UID,
+		if apierrors.IsNotFound(err) {
+			ingress := networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        zabbix.ObjectMeta.Name + "-ingress",
+					Namespace:   zabbix.ObjectMeta.Namespace,
+					Labels:      r.componentLabels(zabbix, "ingress"),
+					Annotations: zabbix.Spec.Web.Ingress.Annotations,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: zabbix.APIVersion,
+							Kind:       zabbix.Kind,
+							Name:       zabbix.Name,
+							UID:        zabbix.UID,
+						},
 					},
 				},
-			},
-			Spec: networkingv1.IngressSpec{
-				IngressClassName: &zabbix.Spec.Web.Ingress.ClassName,
-				Rules: []networkingv1.IngressRule{
-					{
-						Host: zabbix.Spec.Web.Ingress.Host,
-						IngressRuleValue: networkingv1.IngressRuleValue{
-							HTTP: &networkingv1.HTTPIngressRuleValue{
-								Paths: []networkingv1.HTTPIngressPath{
-									{
-										Path:     zabbix.Spec.Web.Ingress.Path,
-										PathType: pathType,
-										Backend: networkingv1.IngressBackend{
-											Service: &networkingv1.IngressServiceBackend{
-												Name: zabbix.ObjectMeta.Name + "-web",
-												Port: networkingv1.ServiceBackendPort{
-													Number: 80,
+				Spec: networkingv1.IngressSpec{
+					IngressClassName: &zabbix.Spec.Web.Ingress.ClassName,
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: zabbix.Spec.Web.Ingress.Host,
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:     zabbix.Spec.Web.Ingress.Path,
+											PathType: pathType,
+											Backend: networkingv1.IngressBackend{
+												Service: &networkingv1.IngressServiceBackend{
+													Name: zabbix.ObjectMeta.Name + "-web",
+													Port: networkingv1.ServiceBackendPort{
+														Number: 80,
+													},
 												},
 											},
 										},
@@ -376,24 +380,25 @@ func (r *ZabbixReconciler) createOrUpdateIngress(ctx context.Context, zabbix *mo
 							},
 						},
 					},
-				},
-				TLS: func() []networkingv1.IngressTLS {
-					if zabbix.Spec.Web.Ingress.Tls.Enabled {
-						return []networkingv1.IngressTLS{
-							{
-								Hosts:      zabbix.Spec.Web.Ingress.Tls.Hosts,
-								SecretName: zabbix.Spec.Web.Ingress.Tls.SecretName,
-							},
+					TLS: func() []networkingv1.IngressTLS {
+						if zabbix.Spec.Web.Ingress.Tls.Enabled {
+							return []networkingv1.IngressTLS{
+								{
+									Hosts:      zabbix.Spec.Web.Ingress.Tls.Hosts,
+									SecretName: zabbix.Spec.Web.Ingress.Tls.SecretName,
+								},
+							}
 						}
-					}
-					return nil
-				}(),
-			},
-		}
+						return nil
+					}(),
+				},
+			}
 
-		err := r.Create(ctx, &ingress)
-		if err != nil {
-			return fmt.Errorf("failed to create zabbix ingress: %w", err)
+			err := r.Create(ctx, &ingress)
+			if err != nil {
+				return fmt.Errorf("failed to create zabbix ingress: %w", err)
+			}
+			return nil
 		}
 	}
 
