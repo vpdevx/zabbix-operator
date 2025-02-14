@@ -34,15 +34,13 @@ This project aims to provide an efficient and automated way to manage Zabbix wit
 
 - Implement basic CRD for Zabbix deployment. :white_check_mark:
 
-- Automate Zabbix Server deployment with database connection support. :hourglass:
+- Automate Zabbix Server deployment with database connection support. :white_check_mark:
 
 ## Phase 3: Core Functionalities
 
-- Deploy Zabbix Frontend with service exposure. :hourglass:
+- Deploy Zabbix Frontend with service exposure. :white_check_mark:
  
-- Configure persistent storage for Zabbix data. :hourglass:
-
-- Implement automatic configuration management (e.g., zabbix_server.conf). :hourglass:
+- Configure persistent storage for Zabbix data (agent and server configuration files). :hourglass:
 
 - Add maintenance tasks (database sanitization, optimization) using Kubernetes CronJobs. :hourglass:
 
