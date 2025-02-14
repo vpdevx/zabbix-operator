@@ -102,6 +102,12 @@ func (r *ZabbixReconciler) reconcileCreate(ctx context.Context, zabbix *monitori
 		return ctrl.Result{}, err
 	}
 
+	logger.Info("Creating Zabbix Agent Daemonset")
+	err = r.createOrUpdateZabbixAgent(ctx, zabbix)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	logger.Info("Creating Zabbix Web")
 	err = r.createOrUpdateZabbixWeb(ctx, zabbix)
 	if err != nil {
@@ -171,6 +177,25 @@ func (r *ZabbixReconciler) createOrUpdateZabbixServer(ctx context.Context, zabbi
 									Env:       r.buildEnvVars(zabbix, "server"),
 									Resources: zabbix.Spec.Server.Resources,
 								},
+								[]corev1.Container{
+									{
+										Name:  zabbix.ObjectMeta.Name + "-server-agent",
+										Image: zabbix.Spec.Agent.Image,
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "agent",
+												ContainerPort: 10050,
+											},
+										},
+										Env: []corev1.EnvVar{
+											{
+												Name:  "ZBX_PASSIVESERVERS",
+												Value: "127.0.0.1/32,::1/128",
+											},
+										},
+										Resources: zabbix.Spec.Agent.Resources,
+									},
+								}[0],
 							},
 						},
 					},
@@ -260,6 +285,75 @@ func (r *ZabbixReconciler) createOrUpdateZabbixWeb(ctx context.Context, zabbix *
 	err := r.Update(ctx, &deployment)
 	if err != nil {
 		return fmt.Errorf("failed to update zabbix web deployment: %w", err)
+	}
+
+	return nil
+}
+
+func (r *ZabbixReconciler) createOrUpdateZabbixAgent(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) error {
+	var daemonSet appsv1.DaemonSet
+	daemonSetName := types.NamespacedName{Name: zabbix.ObjectMeta.Name + "-agent", Namespace: zabbix.ObjectMeta.Namespace}
+	if err := r.Get(ctx, daemonSetName, &daemonSet); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to fetch daemonset: %w", err)
+		}
+
+		if apierrors.IsNotFound(err) {
+			daemonSet := appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      zabbix.ObjectMeta.Name + "-agent",
+					Namespace: zabbix.ObjectMeta.Namespace,
+					Labels:    r.componentLabels(zabbix, "agent"),
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: zabbix.APIVersion,
+							Kind:       zabbix.Kind,
+							Name:       zabbix.Name,
+							UID:        zabbix.UID,
+						},
+					},
+				},
+				Spec: appsv1.DaemonSetSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: r.componentLabels(zabbix, "agent"),
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: r.componentLabels(zabbix, "agent"),
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  zabbix.ObjectMeta.Name + "-agent",
+									Image: zabbix.Spec.Agent.Image,
+									Ports: []corev1.ContainerPort{
+										{
+											Name:          "zabbix-agent",
+											ContainerPort: 10050,
+										},
+									},
+									Env:       r.buildEnvVars(zabbix, "agent"),
+									Resources: zabbix.Spec.Agent.Resources,
+								},
+							},
+						},
+					},
+				},
+			}
+			err := r.Create(ctx, &daemonSet)
+			if err != nil {
+				return fmt.Errorf("failed to create zabbix agent daemonset: %w", err)
+			}
+			return nil
+		}
+	}
+
+	daemonSet.Spec.Template.Spec.Containers[0].Image = zabbix.Spec.Agent.Image
+	daemonSet.Spec.Template.Spec.Containers[0].Env = r.buildEnvVars(zabbix, "agent")
+	daemonSet.Spec.Template.Spec.Containers[0].Resources = zabbix.Spec.Agent.Resources
+	err := r.Update(ctx, &daemonSet)
+	if err != nil {
+		return fmt.Errorf("failed to update zabbix agent daemonset: %w", err)
 	}
 
 	return nil
@@ -483,7 +577,7 @@ func (r *ZabbixReconciler) buildEnvVars(zabbix *monitoringv1alpha1.Zabbix, compo
 		envVars = append(envVars, []corev1.EnvVar{
 			{
 				Name:  "ZBX_SERVER_HOST",
-				Value: zabbix.ObjectMeta.Name + "-server." + zabbix.ObjectMeta.Namespace + ".svc.cluster.local",
+				Value: zabbix.ObjectMeta.Name + "-server",
 			},
 		}...)
 
@@ -503,6 +597,14 @@ func (r *ZabbixReconciler) buildEnvVars(zabbix *monitoringv1alpha1.Zabbix, compo
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
 						FieldPath: "spec.nodeName",
+					},
+				},
+			},
+			{
+				Name: "ZBX_HOSTINTERFACE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "status.hostIP",
 					},
 				},
 			},
