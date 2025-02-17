@@ -46,7 +46,7 @@ spec:
       enabled: true
       className: traefik
       annotations:
-        zabbix.io/test: test
+        foo.example.com/CamelCase.com: bar
       host: zabbix.lab4ever.xyz
       path: /
       pathType: Prefix

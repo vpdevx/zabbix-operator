@@ -73,7 +73,7 @@ func (r *ZabbixReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.reconcileDelete(ctx, zabbix)
 	}
 
-	logger.Info("Creating Zabbix resource")
+	logger.Info("Reconciling Zabbix resource")
 	return r.reconcileCreate(ctx, zabbix)
 }
 
@@ -90,13 +90,13 @@ func (r *ZabbixReconciler) reconcileDelete(ctx context.Context, zabbix *monitori
 
 func (r *ZabbixReconciler) reconcileCreate(ctx context.Context, zabbix *monitoringv1alpha1.Zabbix) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Creating Zabbix Server")
+	logger.Info("Reconciling Zabbix Server")
 	err := r.createOrUpdateZabbixServer(ctx, zabbix)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Creating Zabbix Server Service")
+	logger.Info("")
 	err = r.createService(ctx, zabbix, "server")
 	if err != nil {
 		return ctrl.Result{}, err
